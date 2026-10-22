@@ -1,4 +1,106 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<style>
+#appsync{margin:12px 14px;padding:16px 18px;border-radius:16px;border:3px solid #c8643b;background:#fff4ee;color:#1c1b19;font:500 26px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif}
+#appsync[hidden]{display:none!important}
+#appsync b{display:block;font-size:30px;margin-bottom:6px}
+#appsync .as-msg{margin:0 0 12px}
+#appsync .as-row{display:flex;gap:10px;flex-wrap:wrap}
+#appsync input{flex:1 1 220px;min-width:0;font:600 28px system-ui,sans-serif;padding:12px 14px;border:2px solid #b9b3a8;border-radius:12px;background:#fff;color:#1c1b19}
+#appsync button{font:700 28px system-ui,sans-serif;padding:12px 22px;border:0;border-radius:12px;background:#1c1b19;color:#fff;cursor:pointer}
+#appsync .as-x{background:transparent;color:#6f6b63;padding:12px 8px;font-weight:600}
+@media (prefers-color-scheme:dark){#appsync{background:#2d231e;color:#eeebe4;border-color:#e3855c}#appsync input{background:#161513;color:#eeebe4;border-color:#4a463f}#appsync button{background:#eeebe4;color:#161513}#appsync .as-x{background:transparent;color:#a29d93}}
+</style>
+<div id="appsync" hidden>
+  <b>Send this log to Claude</b>
+  <p class="as-msg" id="appsync-msg">Enter your password once. After that, everything you save is sent automatically.</p>
+  <div class="as-row"><input id="appsync-pass" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="password" aria-label="Password"><button id="appsync-save" type="button">Save</button><button id="appsync-later" class="as-x" type="button">Later</button></div>
+</div>
+<script>
+// Sends saved entries to Igor's "App Logs" Google Sheet. Shared by all his phone apps.
+window.AppSync = (function () {
+  var URL = "https://script.google.com/macros/s/AKfycbztATiu4PQzOnIuSqcF1AocXGo1RfsupmiqJVyFjFSRJUl5Jb_bS2Y8YTTcJ5IZwO19YQ/exec";
+  var KQ = "appsync-queue", KP = "appsync-pass", KL = "appsync-later";
+  function get(k, d) { try { var v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
+  function put(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  var busy = false, box, msg;
+
+  function showBox(text) {
+    if (!box) return;
+    if (text) msg.textContent = text;
+    box.hidden = false;
+  }
+  function setup() {
+    box = document.getElementById("appsync"); msg = document.getElementById("appsync-msg");
+    if (!box) return;
+    if (box.parentNode !== document.body || document.body.firstElementChild !== box) document.body.insertBefore(box, document.body.firstChild);
+    document.getElementById("appsync-save").addEventListener("click", function () {
+      var p = document.getElementById("appsync-pass").value.trim().toLowerCase();
+      if (!p) return;
+      put(KP, p); put(KL, 0); box.hidden = true; msg.textContent = "Checking…";
+      check();
+    });
+    document.getElementById("appsync-later").addEventListener("click", function () { put(KL, Date.now()); box.hidden = true; });
+    if (!get(KP, "") && Date.now() - get(KL, 0) > 12 * 3600 * 1000) showBox();
+    setTimeout(flush, 1500);
+  }
+
+  function post(body) {
+    return fetch(URL, { method: "POST", body: JSON.stringify(body) }).then(function (r) { return r.json(); });
+  }
+  // Called after a password is typed: confirms it right away, even with nothing to send.
+  function check() {
+    var pass = get(KP, "");
+    post({ key: pass, app: "_check", id: "check" }).then(function (r) {
+      if (r && r.error === "password") { put(KP, ""); showBox("That password didn't work. Please type it again."); return; }
+      flush();
+    }).catch(function () { flush(); });
+  }
+
+  function send(app, entry) {
+    if (!entry || !entry.id) return;
+    var q = get(KQ, []).filter(function (x) { return !(x.app === app && x.id === entry.id); });
+    q.push({ app: app, id: String(entry.id), date: entry.date || "", summary: entry.summary || "", details: entry.details || {} });
+    put(KQ, q.slice(-500));
+    flush();
+  }
+
+  function flush() {
+    if (busy) return;
+    var q = get(KQ, []);
+    if (!q.length) return;
+    var pass = get(KP, "");
+    if (!pass) { if (Date.now() - get(KL, 0) > 12 * 3600 * 1000) showBox(); return; }
+    if (navigator.onLine === false) return;
+    busy = true;
+    var item = q[0];
+    post({ key: pass, app: item.app, id: item.id, date: item.date, summary: item.summary, details: item.details })
+      .then(function (r) {
+        busy = false;
+        if (r && r.ok) {
+          put(KQ, get(KQ, []).filter(function (x) { return !(x.app === item.app && x.id === item.id && x.summary === item.summary); }));
+          flush();
+        } else if (r && r.error === "password") {
+          put(KP, ""); showBox("That password didn't work. Please type it again.");
+        }
+      })
+      .catch(function () { busy = false; });
+  }
+
+  // Sends an app's existing history once, the first time this code runs on the phone.
+  function backfill(name, fn) {
+    if (get("appsync-bf-" + name, 0)) return;
+    try { fn(); put("appsync-bf-" + name, 1); } catch (e) {}
+  }
+
+  window.addEventListener("online", flush);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") flush(); });
+  setInterval(flush, 60000);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", setup); else setup();
+  return { send: send, flush: flush, backfill: backfill };
+})();
+</script>
+
+
 <title>Igor's Gym Log</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -192,11 +294,23 @@ async function saveExercise(dayKey, exId, count, btn) {
       if (dbOk) { const { id: _, ...body } = s; await db.collection('sessions').doc(id).set(body); }
       else { const all = store.get('gym-sessions', []).filter(x => x.id !== id); all.push(s); store.set('gym-sessions', all); loadLocal(); }
       btn.textContent = 'Saved ✓'; btn.classList.add('ok');
+      syncSession(s);
     } catch (e) {
       btn.textContent = e && e.code === 'quota_exceeded' ? 'Log is full' : 'Not saved — tap again';
     }
   });
 }
+
+function gymEntry(s) {
+  const names = {}; DAYS.forEach(d => d.ex.forEach(e => names[e.id] = e.name));
+  const used = Object.entries(s.ex || {}).filter(([, v]) => v.some(x => x.kg || x.reps));
+  const d = DAYS.find(x => x.key === s.day);
+  const sets = {}; used.forEach(([k, v]) => sets[names[k] || k] = v.filter(x => x.kg || x.reps));
+  return { id: 'gym-' + s.id, date: s.date,
+    summary: `Day ${s.day}${d ? ' (' + d.title + ')' : ''}, ${PHASES[s.phase] || ''}: ` + used.map(([k, v]) => `${names[k] || k} ${fmtSets(v)}`).join('; '),
+    details: { day: s.day, phase: PHASES[s.phase] || '', sets } };
+}
+function syncSession(s) { try { if (window.AppSync) AppSync.send('Gym', gymEntry(s)); } catch (e) {} }
 
 function loadLocal() {
   sessions = store.get('gym-sessions', []).sort((a, b) => (b.date + b.day).localeCompare(a.date + a.day));
@@ -229,6 +343,7 @@ $('#tx').onclick = () => { tEnd = Date.now(); tick(); };
 
 loadLocal();
 render();
+if (window.AppSync) AppSync.backfill('gym', () => store.get('gym-sessions', []).forEach(syncSession));
 setStatus('Log on this phone');
 (async () => {
   try { db = await (window.claude && window.claude.use ? window.claude.use('db') : null); } catch (e) { db = null; }
